@@ -61,20 +61,22 @@ func (h *Hub) Attach(code, memberId string, conn *websocket.Conn) *SafeConn {
 	return sc
 }
 
-func (h *Hub) Detach(code, memberId string, sc *SafeConn) {
+// Detach removes sc from the room only if it is still the member's current
+// socket. It reports whether it did: false means a newer connection has
+// replaced sc, and the member is still online through that one.
+func (h *Hub) Detach(code, memberId string, sc *SafeConn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	room, ok := h.sockets[code]
-	if !ok {
-		return
+	if !ok || room[memberId] != sc {
+		return false
 	}
-	if room[memberId] == sc {
-		delete(room, memberId)
-	}
+	delete(room, memberId)
 	if len(room) == 0 {
 		delete(h.sockets, code)
 	}
+	return true
 }
 
 func (h *Hub) DropParty(code string) {

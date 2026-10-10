@@ -547,11 +547,13 @@ func handleLeaveParty(w http.ResponseWriter, r *http.Request) {
 	membersFrame := membersFrame(p)
 	p.Unlock()
 
-	// Notify room and drop leaving member socket
+	// Tell the leaving device, then drop its socket. Left open, it kept receiving
+	// the party's state and could keep sending controls.
 	hubInst.Send(p.Code, memberId, map[string]interface{}{
 		"type":   protocol.FrameBye,
 		"reason": "left",
 	})
+	hubInst.CloseMember(p.Code, memberId)
 	hubInst.Broadcast(p.Code, membersFrame, memberId)
 
 	jsonResponse(w, http.StatusOK, map[string]bool{"ok": true})
@@ -859,14 +861,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(config.WebSocketMaxBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(time.Duration(config.ConnectionIdleMs) * time.Millisecond))
 
+	// Membership is checked and the socket attached under one lock. A member
+	// removed after authenticating (left, kicked, expired) must not get a socket
+	// the leave path could no longer find and close.
 	p.Lock()
+	if p.Members[member.MemberId] != member {
+		p.Unlock()
+		_ = conn.Close()
+		return
+	}
 	p.MarkConnected(member, true)
-	p.Unlock()
-
 	sc := hubInst.Attach(p.Code, member.MemberId, conn)
 
-	// Send welcome frame
-	p.Lock()
 	welcome := map[string]interface{}{
 		"type":     protocol.FrameWelcome,
 		"you":      member.ToWire(),
@@ -881,8 +887,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Read loop
 	defer func() {
-		hubInst.Detach(p.Code, member.MemberId, sc)
+		// Only the socket still attached may mark the member offline. If a
+		// reconnect replaced this one, Attach already closed it, and the member
+		// is online through the new socket.
+		current := hubInst.Detach(p.Code, member.MemberId, sc)
 		_ = sc.Close()
+		if !current {
+			return
+		}
 
 		p.Lock()
 		p.MarkConnected(member, false)
@@ -910,6 +922,13 @@ func handleSocketFrame(p *party.Party, member *party.Member, sc *hub.SafeConn, f
 
 	p.Lock()
 	defer p.Unlock()
+	// A member the party no longer holds (expired by the sweep, or removed while
+	// the socket stayed open) must not act on the party. Close the socket so the
+	// read loop ends.
+	if p.Members[member.MemberId] != member {
+		_ = sc.Close()
+		return
+	}
 	if !p.SpendFrameBudget(member) {
 		_ = sc.WriteJSON(map[string]interface{}{
 			"type": protocol.FrameError, "error": "rate_limited", "message": "Too many messages at once.",

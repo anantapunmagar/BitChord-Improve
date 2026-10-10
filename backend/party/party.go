@@ -670,7 +670,11 @@ func (p *Party) Remove(memberId string) *Member {
 		return nil
 	}
 	delete(p.Members, memberId)
-	if m.IsHost && len(p.Members) > 0 {
+	// A removed host must lose the title here, not just the seat: its socket can
+	// outlive its membership, and MayControl and kick read IsHost from the Member.
+	wasHost := m.IsHost
+	m.IsHost = false
+	if wasHost && len(p.Members) > 0 {
 		for _, next := range p.Members {
 			next.IsHost = true
 			break
