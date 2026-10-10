@@ -15,11 +15,20 @@ import (
 
 	"github.com/KabirSinghBhatia/BitChord/backend/clock"
 	"github.com/KabirSinghBhatia/BitChord/backend/config"
+	"github.com/KabirSinghBhatia/BitChord/backend/party"
 	"github.com/KabirSinghBhatia/BitChord/backend/presence"
 	"github.com/KabirSinghBhatia/BitChord/backend/protocol"
 )
 
 func setupTestServer() *httptest.Server {
+	// createLimiter is a package global keyed by 127.0.0.1, and every test shares
+	// that address. Without a fresh limiter per server, a second run in the same
+	// process (go test -count=N) exhausts the create allowance and gets 429s.
+	createLimiter = newIPRateLimiter(time.Minute, config.CreateRatePerMinute, config.RateLimitMaxEntries)
+	// Parties are never swept during tests, so repeated runs would fill the
+	// service-wide MaxParties cap and every later create would get 503.
+	store = party.NewPartyStore()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /healthz", handleHealthz)
